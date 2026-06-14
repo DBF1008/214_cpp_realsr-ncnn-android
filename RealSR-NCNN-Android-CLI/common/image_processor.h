@@ -60,6 +60,36 @@ static bool is_supported_encode_format(const path_t& ext) {
     return SUPPORTED_ENCODE_EXTENSIONS.find(lower_ext) != SUPPORTED_ENCODE_EXTENSIONS.end();
 }
 
+static bool path_looks_like_image_file(const path_t& path)
+{
+    path_t ext = get_file_extension(path);
+    if (ext.empty()) return false;
+    return is_supported_encode_format(ext);
+}
+
+static bool path_exists(const path_t& path)
+{
+#if _WIN32
+    DWORD attr = GetFileAttributesW(path.c_str());
+    return attr != INVALID_FILE_ATTRIBUTES;
+#else
+    struct stat st;
+    return stat(path.c_str(), &st) == 0;
+#endif
+}
+
+static bool path_is_regular_file(const path_t& path)
+{
+#if _WIN32
+    DWORD attr = GetFileAttributesW(path.c_str());
+    return (attr != INVALID_FILE_ATTRIBUTES) && !(attr & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) return false;
+    return S_ISREG(st.st_mode);
+#endif
+}
+
 static path_t apply_name_pattern(const path_t& pattern,
                                   const path_t& name_noext,
                                   const path_t& prog_name,
@@ -285,10 +315,40 @@ static int collect_input_output_files(const path_t& inputpath,
 
     if (input_is_dir)
     {
-        path_t output_dir = outputpath;
-        bool output_exists = path_is_directory(outputpath);
+        // When input is a directory, output must be a directory too.
+        // Reject file-like output paths to prevent accidentally creating
+        // directories named like image files (e.g. "result.png/").
+        if (path_is_regular_file(outputpath))
+        {
+#if _WIN32
+            fwprintf(stderr, L"error: output path '%ls' exists as a regular file. "
+                             L"When input is a directory, output must be a directory path.\n",
+                     outputpath.c_str());
+#else
+            fprintf(stderr, "error: output path '%s' exists as a regular file. "
+                            "When input is a directory, output must be a directory path.\n",
+                    outputpath.c_str());
+#endif
+            return -1;
+        }
 
-        if (!output_exists)
+        if (!path_is_directory(outputpath) && path_looks_like_image_file(outputpath))
+        {
+#if _WIN32
+            fwprintf(stderr, L"error: output path '%ls' looks like a file path, but input is a directory. "
+                             L"When input is a directory, output must be a directory path.\n",
+                     outputpath.c_str());
+#else
+            fprintf(stderr, "error: output path '%s' looks like a file path, but input is a directory. "
+                            "When input is a directory, output must be a directory path.\n",
+                    outputpath.c_str());
+#endif
+            return -1;
+        }
+
+        path_t output_dir = outputpath;
+
+        if (!path_exists(outputpath))
         {
             int ret = create_directory_recursive(output_dir);
             if (ret != 0)
