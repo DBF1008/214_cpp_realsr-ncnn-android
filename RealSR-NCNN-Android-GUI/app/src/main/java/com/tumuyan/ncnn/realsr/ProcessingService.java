@@ -46,10 +46,8 @@ public class ProcessingService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP_TASK.equals(intent.getAction())) {
             Log.i(TAG, "Received stop action");
-            if (imageProcessor != null) {
-                imageProcessor.cancelCurrentTask();
-            }
-            stopForeground(true);
+            // cancelTask() 取消任务并撤下前台通知；随后结束服务。
+            cancelTask();
             stopSelf();
         }
         return START_NOT_STICKY;
@@ -135,6 +133,9 @@ public class ProcessingService extends Service {
         if (imageProcessor != null) {
             imageProcessor.cancelCurrentTask();
         }
+        // 被取消的任务从此保持静默（不再触发 onCompleted/onError），因此前台通知
+        // 必须在这里主动撤下，而不能再依赖那个旧的（错误的）回调来收尾。
+        stopForeground(true);
     }
 
     private void updateNotification(String text) {
