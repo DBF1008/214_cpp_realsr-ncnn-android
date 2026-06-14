@@ -286,10 +286,38 @@ static int collect_input_output_files(const path_t& inputpath,
     if (input_is_dir)
     {
         path_t output_dir = outputpath;
-        bool output_exists = path_is_directory(outputpath);
+        bool output_is_dir = path_is_directory(outputpath);
 
-        if (!output_exists)
+        if (!output_is_dir)
         {
+            // Directory (batch) input produces one output file per input image, so
+            // the output path must denote a directory. If the user passed a path
+            // that clearly names a single image file (e.g. "-o out/result.png"),
+            // reject it instead of silently creating a directory literally named
+            // "result.png" and dumping the whole batch inside. That surprising
+            // behaviour is inconsistent with single-file mode and almost never what
+            // the user intended. Only image-format extensions are treated as
+            // file-like; names such as "out/enhanced" or "results" are still taken
+            // as directories to create.
+            path_t out_ext = get_file_extension(outputpath);
+            if (!out_ext.empty() && is_supported_encode_format(out_ext))
+            {
+#if _WIN32
+                fwprintf(stderr,
+                         L"output path \"%ls\" looks like a file, but the input \"%ls\" is a directory.\n"
+                         L"Batch mode writes one file per input image, so the output must be a directory.\n"
+                         L"Pass a directory as the output path, or process a single image instead.\n",
+                         outputpath.c_str(), inputpath.c_str());
+#else
+                fprintf(stderr,
+                        "output path \"%s\" looks like a file, but the input \"%s\" is a directory.\n"
+                        "Batch mode writes one file per input image, so the output must be a directory.\n"
+                        "Pass a directory as the output path, or process a single image instead.\n",
+                        outputpath.c_str(), inputpath.c_str());
+#endif
+                return -1;
+            }
+
             int ret = create_directory_recursive(output_dir);
             if (ret != 0)
             {
