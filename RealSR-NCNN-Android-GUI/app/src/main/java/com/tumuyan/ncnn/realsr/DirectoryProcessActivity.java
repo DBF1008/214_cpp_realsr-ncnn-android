@@ -64,6 +64,7 @@ public class DirectoryProcessActivity extends AppCompatActivity {
     private ProgressLogHelper progressLog;
     private String savePath;
     private boolean isUpdatingOutputPath = false;
+    private boolean isUpdatingInputPath = false;
     private boolean isProcessing = false;
     private int dirNameFormat = 0;
     private int dirOutputFormat = 0;
@@ -203,6 +204,10 @@ public class DirectoryProcessActivity extends AppCompatActivity {
 
             @Override
             public void afterTextChanged(Editable s) {
+                if (!isUpdatingInputPath) {
+                    // 用户手动编辑输入路径 → 退出 SAF 模式，改用手动路径校验
+                    inputDirUri = null;
+                }
                 String path = s.toString().trim();
                 if (!path.isEmpty()) {
                     File file = new File(path);
@@ -223,8 +228,12 @@ public class DirectoryProcessActivity extends AppCompatActivity {
 
             @Override
             public void afterTextChanged(Editable s) {
-                if (!isUpdatingOutputPath && cbAutoOutput.isChecked()) {
-                    cbAutoOutput.setChecked(false);
+                if (!isUpdatingOutputPath) {
+                    // 用户手动编辑输出路径 → 退出 SAF 模式
+                    outputDirUri = null;
+                    if (cbAutoOutput.isChecked()) {
+                        cbAutoOutput.setChecked(false);
+                    }
                 }
                 updateStartButtonState();
             }
@@ -242,11 +251,9 @@ public class DirectoryProcessActivity extends AppCompatActivity {
 
     private void updateAutoOutputPath(String inputPath) {
         if (cbAutoOutput.isChecked()) {
-            File inputDir = new File(inputPath);
-            String dirName = inputDir.getName();
-            if (dirName.isEmpty()) {
-                dirName = "output";
-            }
+            // 叶子目录名优先取自 SAF tree 信息，回退到路径/文本；
+            // 避免对 content:// 形式调用 new File(...).getName() 得到无意义结果。
+            String dirName = currentInputLeafName(inputPath);
 
             // 根据设置生成目录名（独立目录名选项）
             int modelIndex = spinnerModel.getSelectedItemPosition();
@@ -275,6 +282,8 @@ public class DirectoryProcessActivity extends AppCompatActivity {
             }
 
             String autoOutputPath = savePath + File.separator + dirName;
+            // 自动输出是 savePath 下的真实路径，不是 SAF 授权目录，清掉可能残留的输出 tree URI
+            outputDirUri = null;
             isUpdatingOutputPath = true;
             etOutputDirPath.setText(autoOutputPath);
             isUpdatingOutputPath = false;
@@ -300,24 +309,11 @@ public class DirectoryProcessActivity extends AppCompatActivity {
         intent.putExtra(DocumentsContract.EXTRA_PROMPT, requestCode == REQUEST_CODE_INPUT_DIR ?
                 getString(R.string.dir_select_input_prompt) : getString(R.string.dir_select_output_prompt));
 
-        if (requestCode == REQUEST_CODE_INPUT_DIR) {
-            String currentPath = etInputDirPath.getText().toString().trim();
-            if (!currentPath.isEmpty()) {
-                File file = new File(currentPath);
-                if (file.exists() && file.isDirectory()) {
-                    Uri uri = Uri.fromFile(file);
-                    intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, uri);
-                }
-            }
-        } else if (requestCode == REQUEST_CODE_OUTPUT_DIR) {
-            String currentPath = etOutputDirPath.getText().toString().trim();
-            if (!currentPath.isEmpty()) {
-                File file = new File(currentPath);
-                if (file.exists() && file.isDirectory()) {
-                    Uri uri = Uri.fromFile(file);
-                    intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, uri);
-                }
-            }
+        // 若已持有对应 SAF tree URI，作为选择器的初始位置（正确的 SAF 用法，
+        // 不再用 Uri.fromFile(new File(...))——后者在新版系统会被忽略）。
+        Uri initialUri = (requestCode == REQUEST_CODE_INPUT_DIR) ? inputDirUri : outputDirUri;
+        if (initialUri != null) {
+            intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri);
         }
 
         startActivityForResult(intent, requestCode);
@@ -334,17 +330,22 @@ public class DirectoryProcessActivity extends AppCompatActivity {
                 inputDirUri = treeUri;
                 getContentResolver().takePersistableUriPermission(treeUri,
                         Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-                String path = getAbsolutePathFromTreeUri(treeUri);
-                isUpdatingOutputPath = true;
-                etInputDirPath.setText(path.isEmpty() ? treeUri.toString() : path);
-                isUpdatingOutputPath = false;
+                String path = resolveTreePath(treeUri);
+                isUpdatingInputPath = true;
+                etInputDirPath.setText(path != null ? path : treeUri.toString());
+                isUpdatingInputPath = false;
+                // SAF 选目录后主动刷新自动输出路径：此前仅依赖 File.isDirectory() 触发，
+                // 对 SD 卡 / content 目录不会生效，会导致输出为空、开始按钮无法点亮。
+                if (cbAutoOutput.isChecked()) {
+                    updateAutoOutputPath(etInputDirPath.getText().toString().trim());
+                }
             } else if (requestCode == REQUEST_CODE_OUTPUT_DIR) {
                 outputDirUri = treeUri;
                 getContentResolver().takePersistableUriPermission(treeUri,
                         Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-                String path = getAbsolutePathFromTreeUri(treeUri);
+                String path = resolveTreePath(treeUri);
                 isUpdatingOutputPath = true;
-                etOutputDirPath.setText(path.isEmpty() ? treeUri.toString() : path);
+                etOutputDirPath.setText(path != null ? path : treeUri.toString());
                 isUpdatingOutputPath = false;
                 if (cbAutoOutput.isChecked()) {
                     cbAutoOutput.setChecked(false);
@@ -354,31 +355,64 @@ public class DirectoryProcessActivity extends AppCompatActivity {
         }
     }
 
-    private String getAbsolutePathFromTreeUri(Uri treeUri) {
-        if (treeUri.getPath() == null) return "";
-        String docId = DocumentsContract.getTreeDocumentId(treeUri);
-        if (docId.contains(":")) {
-            String[] split = docId.split(":", 2);
-            if (split.length == 2) {
-                if ("primary".equals(split[0])) {
-                    return Environment.getExternalStorageDirectory() + "/" + split[1];
-                } else {
-                    return "/storage/" + split[0] + "/" + split[1];
+    /**
+     * 把 SAF tree URI 解析为真实文件系统路径（供 native 程序使用）；无法解析时返回 {@code null}。
+     * 解析规则见 {@link SafDirectoryResolver#resolveFilesystemPath(String, String)}（可单元测试）。
+     */
+    private String resolveTreePath(Uri treeUri) {
+        if (treeUri == null) {
+            return null;
+        }
+        try {
+            String docId = DocumentsContract.getTreeDocumentId(treeUri);
+            String primaryRoot = Environment.getExternalStorageDirectory().getAbsolutePath();
+            return SafDirectoryResolver.resolveFilesystemPath(docId, primaryRoot);
+        } catch (Exception e) {
+            Log.w("DirectoryProcess", "resolveTreePath failed: " + treeUri, e);
+            return null;
+        }
+    }
+
+    /**
+     * 取当前输入目录的叶子名（用于自动输出命名）：
+     * 持有 SAF tree URI 时优先取自 tree 信息，否则回退到路径/文本的最后一段，最终回退到 "output"。
+     */
+    private String currentInputLeafName(String inputPathOrDisplay) {
+        if (inputDirUri != null) {
+            try {
+                String leaf = SafDirectoryResolver.leafName(DocumentsContract.getTreeDocumentId(inputDirUri));
+                if (!leaf.isEmpty()) {
+                    return leaf;
                 }
+            } catch (Exception ignored) {
             }
         }
-        return "";
+        if (inputPathOrDisplay != null) {
+            String name = new File(inputPathOrDisplay).getName();
+            if (!name.isEmpty()) {
+                return name;
+            }
+        }
+        return "output";
     }
 
     private void updateStartButtonState() {
         String inputPath = etInputDirPath.getText().toString().trim();
         String outputPath = etOutputDirPath.getText().toString().trim();
 
-        boolean inputValid = !inputPath.isEmpty() && new File(inputPath).exists() && new File(inputPath).isDirectory();
-        boolean outputValid = !outputPath.isEmpty();
+        // 合法性以“是否持有 SAF 授权”为准；仅在手动输入（无 tree URI）时才回退到 File 校验。
+        // 不再对 SAF 选出的路径调用 new File(...).exists()——那正是 SD 卡 / 非 primary 存储 /
+        // 厂商文档提供器被误判为非法路径的根因。
+        boolean inputManualDir = inputDirUri == null && !inputPath.isEmpty()
+                && new File(inputPath).isDirectory();
+        boolean inputValid = SafDirectoryResolver.isInputDirValid(inputDirUri != null, inputManualDir);
+        boolean outputValid = SafDirectoryResolver.isOutputDirValid(outputDirUri != null, !outputPath.isEmpty());
 
-        boolean canStart = inputValid && outputValid;
-        btnStartProcess.setEnabled(canStart);
+        int modelIndex = spinnerModel.getSelectedItemPosition();
+        boolean modelAvailable = commandList != null && commandList.length > 0
+                && modelIndex >= 0 && modelIndex < commandList.length;
+
+        btnStartProcess.setEnabled(SafDirectoryResolver.canStart(inputValid, outputValid, modelAvailable));
     }
 
     private void startBatchProcess() {
@@ -390,20 +424,47 @@ public class DirectoryProcessActivity extends AppCompatActivity {
         String inputPath = etInputDirPath.getText().toString().trim();
         String outputPath = etOutputDirPath.getText().toString().trim();
 
-        if (inputPath.isEmpty()) {
-            Toast.makeText(this, R.string.dir_input_path_error, Toast.LENGTH_SHORT).show();
-            return;
+        // 解析“执行用”的真实文件系统路径：SAF 模式从 tree URI 解析，手动模式直接用文本。
+        // native 程序只能处理真实文件系统路径，无法消费 content:// URI。
+        String execInputPath;
+        if (inputDirUri != null) {
+            execInputPath = resolveTreePath(inputDirUri);
+            if (execInputPath == null) {
+                Toast.makeText(this, R.string.dir_input_unresolvable, Toast.LENGTH_LONG).show();
+                return;
+            }
+        } else {
+            if (inputPath.isEmpty()) {
+                Toast.makeText(this, R.string.dir_input_path_error, Toast.LENGTH_SHORT).show();
+                return;
+            }
+            File inputDir = new File(inputPath);
+            if (!inputDir.exists() || !inputDir.isDirectory()) {
+                Toast.makeText(this, R.string.dir_input_invalid, Toast.LENGTH_SHORT).show();
+                return;
+            }
+            execInputPath = inputPath;
         }
 
-        File inputDir = new File(inputPath);
-        if (!inputDir.exists() || !inputDir.isDirectory()) {
-            Toast.makeText(this, R.string.dir_input_invalid, Toast.LENGTH_SHORT).show();
-            return;
+        String execOutputPath;
+        if (outputDirUri != null) {
+            execOutputPath = resolveTreePath(outputDirUri);
+            if (execOutputPath == null) {
+                Toast.makeText(this, R.string.dir_output_unresolvable, Toast.LENGTH_LONG).show();
+                return;
+            }
+        } else {
+            if (outputPath.isEmpty()) {
+                Toast.makeText(this, R.string.dir_output_path_error, Toast.LENGTH_SHORT).show();
+                return;
+            }
+            execOutputPath = outputPath;
         }
 
-        if (outputPath.isEmpty()) {
-            Toast.makeText(this, R.string.dir_output_path_error, Toast.LENGTH_SHORT).show();
-            return;
+        // 输出目录可能尚不存在（自动命名 / 新建目录），尽力创建。
+        try {
+            new File(execOutputPath).mkdirs();
+        } catch (Exception ignored) {
         }
 
         int modelIndex = spinnerModel.getSelectedItemPosition();
@@ -439,15 +500,15 @@ public class DirectoryProcessActivity extends AppCompatActivity {
 
         String finalCmd = cmdBuilder.toString();
 
-        String safeInputPath = ShellUtils.escapeShellArgument(inputPath + "/");
-        String safeOutputPath = ShellUtils.escapeShellArgument(outputPath);
+        String safeInputPath = ShellUtils.escapeShellArgument(execInputPath + "/");
+        String safeOutputPath = ShellUtils.escapeShellArgument(execOutputPath);
         String execCmd = finalCmd.replace("input.png", safeInputPath)
                 .replace("output.png", safeOutputPath);
 
         progressLog = new ProgressLogHelper();
         progressLog.reset();
-        progressLog.appendLine(getString(R.string.dir_log_starting, inputPath));
-        progressLog.appendLine(getString(R.string.dir_log_output_to, outputPath));
+        progressLog.appendLine(getString(R.string.dir_log_starting, execInputPath));
+        progressLog.appendLine(getString(R.string.dir_log_output_to, execOutputPath));
         progressLog.appendLine("Command: " + execCmd);
         tvLog.setText(progressLog.getDisplayText());
         btnStartProcess.setEnabled(false);

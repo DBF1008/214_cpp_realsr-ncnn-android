@@ -265,6 +265,8 @@ Even if this feature is disabled, you can still select multiple images from othe
     <string name="dir_input_path_error">Cannot get input directory path. Please select a valid directory.</string>
     <string name="dir_input_invalid">Input path is not a valid directory</string>
     <string name="dir_output_path_error">Please specify output directory</string>
+    <string name="dir_input_unresolvable">Could not resolve a usable file path for the selected input folder. Please pick a folder on internal storage.</string>
+    <string name="dir_output_unresolvable">Could not resolve a usable file path for the selected output folder. Please pick a folder on internal storage.</string>
     <string name="dir_input_hint">Enter input directory path or use Browse button</string>
     <string name="dir_output_hint">Enter output directory path or use Browse button</string>
     <string name="dir_auto_output_label">Auto</string>
