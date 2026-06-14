@@ -10,6 +10,76 @@
 #include "waifu2x_preproc_tta.comp.hex.h"
 #include "waifu2x_postproc_tta.comp.hex.h"
 
+#include <cstring>
+
+#include "tile_copy_plan.h"
+
+// Download a full-width GPU output band (out_gpu) and write it into outimage at
+// vertical offset dst_y0 (in destination rows), clamped so a mis-sized edge
+// tile can never overflow the destination buffer.
+//
+// We deliberately download into a self-owned ncnn::Mat instead of aliasing
+// outimage with an external-pointer Mat: record_clone then allocates a buffer
+// that always matches the real out_gpu, and we copy into outimage ourselves
+// using a bounds-checked plan. This removes the unsafe external-pointer clone
+// and the dependence on a fixed offset/size formula matching the GPU result.
+static void download_out_gpu_to_image(ncnn::VkCompute& cmd,
+                                      const ncnn::VkMat& out_gpu,
+                                      ncnn::Mat& outimage,
+                                      int dst_y0,
+                                      int channels,
+                                      const ncnn::Option& opt)
+{
+    ncnn::Mat out;
+    cmd.record_clone(out_gpu, out, opt);
+    cmd.submit_and_wait();
+
+    if (out.empty())
+        return;
+
+    const realsr_ncnn::TileBandCopyPlan plan =
+        realsr_ncnn::plan_tile_band_copy(out.w, out.h, outimage.w, outimage.h, dst_y0);
+    if (!plan.valid)
+        return;
+
+    unsigned char* dst = (unsigned char*)outimage.data + (size_t)plan.dst_y0 * outimage.w * channels;
+    const int dst_stride = outimage.w * channels;
+
+    if (opt.use_fp16_storage && opt.use_int8_storage)
+    {
+        // int8 storage: out already holds the final interleaved bytes.
+        const unsigned char* src = (const unsigned char*)out.data;
+        const int src_stride = out.w * channels;
+        const size_t row_bytes = (size_t)plan.copy_w * channels;
+        for (int y = 0; y < plan.copy_h; y++)
+            memcpy(dst + (size_t)y * dst_stride, src + (size_t)y * src_stride, row_bytes);
+    }
+    else
+    {
+        // float storage: convert the CHW float tile to interleaved pixels.
+        ncnn::Mat band = out;
+        if (plan.copy_h != out.h || plan.copy_w != out.w)
+            ncnn::copy_cut_border(out, band, 0, out.h - plan.copy_h, 0, out.w - plan.copy_w, opt);
+
+        if (channels == 3)
+        {
+#if _WIN32
+            band.to_pixels(dst, ncnn::Mat::PIXEL_RGB2BGR, dst_stride);
+#else
+            band.to_pixels(dst, ncnn::Mat::PIXEL_RGB, dst_stride);
+#endif
+        }
+        else if (channels == 4)
+        {
+#if _WIN32
+            band.to_pixels(dst, ncnn::Mat::PIXEL_RGBA2BGRA, dst_stride);
+#else
+            band.to_pixels(dst, ncnn::Mat::PIXEL_RGBA, dst_stride);
+#endif
+        }
+    }
+}
+
 Waifu2x::Waifu2x(int gpuid, bool _tta_mode, int num_threads)
 {
     vkdev = gpuid == -1 ? 0 : ncnn::get_gpu_device(gpuid);
@@ -469,31 +539,8 @@ int Waifu2x::process(const ncnn::Mat& inimage, ncnn::Mat& outimage) const
             }
         }
 
-        // download
-        {
-            ncnn::Mat out;
-
-            if (opt.use_fp16_storage && opt.use_int8_storage)
-            {
-                out = ncnn::Mat(out_gpu.w, out_gpu.h, (unsigned char*)outimage.data + yi * scale * TILE_SIZE_Y * w * scale * channels, (size_t)channels, 1);
-            }
-
-            cmd.record_clone(out_gpu, out, opt);
-
-            cmd.submit_and_wait();
-
-            if (!(opt.use_fp16_storage && opt.use_int8_storage))
-            {
-                if (channels == 3)
-                {
-#if _WIN32
-                    out.to_pixels((unsigned char*)outimage.data + yi * scale * TILE_SIZE_Y * w * scale * channels, ncnn::Mat::PIXEL_RGB2BGR);
-#else
-                    out.to_pixels((unsigned char*)outimage.data + yi * scale * TILE_SIZE_Y * w * scale * channels, ncnn::Mat::PIXEL_RGB);
-#endif
-                }
-            }
-        }
+        // download (safe, clamped writeback; see download_out_gpu_to_image)
+        download_out_gpu_to_image(cmd, out_gpu, outimage, out_tile_y0 * scale, channels, opt);
     }
 
     vkdev->reclaim_blob_allocator(blob_vkallocator);
