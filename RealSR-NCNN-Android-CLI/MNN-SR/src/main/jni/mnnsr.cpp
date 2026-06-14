@@ -330,7 +330,7 @@ int MNNSR::process(const cv::Mat& inimage, cv::Mat& outimage, const cv::Mat& mas
         xtiles, ytiles, tilesize, tileWidth, tileHeight, prepadding, xPrepadding, yPrepadding);
 
     high_resolution_clock::time_point begin = high_resolution_clock::now();
-    high_resolution_clock::time_point time_print_progress;
+    high_resolution_clock::time_point time_print_progress = begin;
 
     //    cv::Mat imageOut(outHeight, outWidth, inimage.type()); // 填充灰色背景
 
