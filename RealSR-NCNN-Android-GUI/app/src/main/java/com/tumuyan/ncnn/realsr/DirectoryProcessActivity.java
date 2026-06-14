@@ -204,11 +204,8 @@ public class DirectoryProcessActivity extends AppCompatActivity {
             @Override
             public void afterTextChanged(Editable s) {
                 String path = s.toString().trim();
-                if (!path.isEmpty()) {
-                    File file = new File(path);
-                    if (file.exists() && file.isDirectory()) {
-                        updateAutoOutputPath(path);
-                    }
+                if (!path.isEmpty() && isInputPathValid()) {
+                    updateAutoOutputPath(path);
                 }
                 updateStartButtonState();
             }
@@ -242,11 +239,7 @@ public class DirectoryProcessActivity extends AppCompatActivity {
 
     private void updateAutoOutputPath(String inputPath) {
         if (cbAutoOutput.isChecked()) {
-            File inputDir = new File(inputPath);
-            String dirName = inputDir.getName();
-            if (dirName.isEmpty()) {
-                dirName = "output";
-            }
+            String dirName = getInputDirName();
 
             // 根据设置生成目录名（独立目录名选项）
             int modelIndex = spinnerModel.getSelectedItemPosition();
@@ -301,22 +294,12 @@ public class DirectoryProcessActivity extends AppCompatActivity {
                 getString(R.string.dir_select_input_prompt) : getString(R.string.dir_select_output_prompt));
 
         if (requestCode == REQUEST_CODE_INPUT_DIR) {
-            String currentPath = etInputDirPath.getText().toString().trim();
-            if (!currentPath.isEmpty()) {
-                File file = new File(currentPath);
-                if (file.exists() && file.isDirectory()) {
-                    Uri uri = Uri.fromFile(file);
-                    intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, uri);
-                }
+            if (inputDirUri != null) {
+                intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, inputDirUri);
             }
         } else if (requestCode == REQUEST_CODE_OUTPUT_DIR) {
-            String currentPath = etOutputDirPath.getText().toString().trim();
-            if (!currentPath.isEmpty()) {
-                File file = new File(currentPath);
-                if (file.exists() && file.isDirectory()) {
-                    Uri uri = Uri.fromFile(file);
-                    intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, uri);
-                }
+            if (outputDirUri != null) {
+                intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, outputDirUri);
             }
         }
 
@@ -334,7 +317,7 @@ public class DirectoryProcessActivity extends AppCompatActivity {
                 inputDirUri = treeUri;
                 getContentResolver().takePersistableUriPermission(treeUri,
                         Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-                String path = getAbsolutePathFromTreeUri(treeUri);
+                String path = SafPathHelper.getAbsolutePathFromTreeUri(treeUri);
                 isUpdatingOutputPath = true;
                 etInputDirPath.setText(path.isEmpty() ? treeUri.toString() : path);
                 isUpdatingOutputPath = false;
@@ -342,7 +325,7 @@ public class DirectoryProcessActivity extends AppCompatActivity {
                 outputDirUri = treeUri;
                 getContentResolver().takePersistableUriPermission(treeUri,
                         Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-                String path = getAbsolutePathFromTreeUri(treeUri);
+                String path = SafPathHelper.getAbsolutePathFromTreeUri(treeUri);
                 isUpdatingOutputPath = true;
                 etOutputDirPath.setText(path.isEmpty() ? treeUri.toString() : path);
                 isUpdatingOutputPath = false;
@@ -354,27 +337,43 @@ public class DirectoryProcessActivity extends AppCompatActivity {
         }
     }
 
-    private String getAbsolutePathFromTreeUri(Uri treeUri) {
-        if (treeUri.getPath() == null) return "";
-        String docId = DocumentsContract.getTreeDocumentId(treeUri);
-        if (docId.contains(":")) {
-            String[] split = docId.split(":", 2);
-            if (split.length == 2) {
-                if ("primary".equals(split[0])) {
-                    return Environment.getExternalStorageDirectory() + "/" + split[1];
-                } else {
-                    return "/storage/" + split[0] + "/" + split[1];
-                }
-            }
+    /**
+     * Validates the input path.  When a SAF tree URI has been stored (the normal
+     * case after ACTION_OPEN_DOCUMENT_TREE), validation goes through
+     * {@link SafPathHelper#isValidTreeUri(Uri, Context)} which correctly handles
+     * SD cards, USB-OTG, and vendor document providers.  Falls back to a plain
+     * {@link File} check for manually-typed filesystem paths.
+     */
+    private boolean isInputPathValid() {
+        if (inputDirUri != null && SafPathHelper.isSafUri(inputDirUri)) {
+            return SafPathHelper.isValidTreeUri(inputDirUri, this);
         }
-        return "";
+        String inputPath = etInputDirPath.getText().toString().trim();
+        if (inputPath.isEmpty()) return false;
+        File file = new File(inputPath);
+        return file.exists() && file.isDirectory();
+    }
+
+    /**
+     * Extracts the directory name for auto-output path generation.
+     * Uses the stored SAF URI when available for reliable name extraction
+     * regardless of storage volume.
+     */
+    private String getInputDirName() {
+        if (inputDirUri != null && SafPathHelper.isSafUri(inputDirUri)) {
+            return SafPathHelper.getDisplayNameFromTreeUri(inputDirUri);
+        }
+        String inputPath = etInputDirPath.getText().toString().trim();
+        if (inputPath.isEmpty()) return "output";
+        File file = new File(inputPath);
+        String name = file.getName();
+        return name.isEmpty() ? "output" : name;
     }
 
     private void updateStartButtonState() {
-        String inputPath = etInputDirPath.getText().toString().trim();
         String outputPath = etOutputDirPath.getText().toString().trim();
 
-        boolean inputValid = !inputPath.isEmpty() && new File(inputPath).exists() && new File(inputPath).isDirectory();
+        boolean inputValid = isInputPathValid();
         boolean outputValid = !outputPath.isEmpty();
 
         boolean canStart = inputValid && outputValid;
@@ -395,8 +394,7 @@ public class DirectoryProcessActivity extends AppCompatActivity {
             return;
         }
 
-        File inputDir = new File(inputPath);
-        if (!inputDir.exists() || !inputDir.isDirectory()) {
+        if (!isInputPathValid()) {
             Toast.makeText(this, R.string.dir_input_invalid, Toast.LENGTH_SHORT).show();
             return;
         }
