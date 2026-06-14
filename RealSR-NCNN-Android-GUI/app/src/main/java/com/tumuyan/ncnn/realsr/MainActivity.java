@@ -772,6 +772,61 @@ public class MainActivity extends AppCompatActivity {
         logTextView.setText(String.format(getString(R.string.input_file_size), inputFileSize));
     }
 
+    /**
+     * Collects image {@link Uri}s from the result {@link Intent} of a picker started with
+     * {@code ACTION_GET_CONTENT} + {@code EXTRA_ALLOW_MULTIPLE}.
+     * <p>
+     * Such a picker is not guaranteed to return a {@link ClipData}: many systems and document
+     * providers deliver a single {@link Uri} via {@link Intent#getData()} when only one item is
+     * chosen (or when the provider only ever hands back a single URI). Assuming a non-null
+     * {@code ClipData} therefore crashes with a {@link NullPointerException} on those single-URI
+     * results. This helper tolerates single-URI, multi-URI ({@code ClipData}) and mixed responses,
+     * skipping null entries and de-duplicating while preserving selection order.
+     *
+     * @param data the picker result intent (may be {@code null})
+     * @return the selected URIs, never {@code null} (possibly empty)
+     */
+    static List<Uri> collectImageUris(Intent data) {
+        if (data == null)
+            return new ArrayList<>();
+        List<Uri> clipUris = new ArrayList<>();
+        ClipData clipData = data.getClipData();
+        if (clipData != null) {
+            for (int i = 0; i < clipData.getItemCount(); i++) {
+                ClipData.Item item = clipData.getItemAt(i);
+                if (item != null)
+                    clipUris.add(item.getUri()); // may be null; filtered out by mergeSelectedUris
+            }
+        }
+        return mergeSelectedUris(clipUris, data.getData());
+    }
+
+    /**
+     * Merges the URIs found in a {@link ClipData} with the single {@link Intent#getData()} URI into
+     * one ordered list, skipping {@code null}s and removing duplicates.
+     * <p>
+     * Kept generic and free of Android types so the selection-merging logic can be exercised by a
+     * host-side JVM unit test, where {@code android.net.Uri} is only a non-functional stub.
+     *
+     * @param clipUris  URIs taken from the result's {@code ClipData} (may be {@code null} or empty,
+     *                  may contain {@code null} elements)
+     * @param singleUri the result's single {@code getData()} URI (may be {@code null})
+     * @param <T>       the URI representation (real {@code Uri} in production, a stand-in in tests)
+     * @return an ordered, de-duplicated list with {@code null}s removed; never {@code null}
+     */
+    static <T> List<T> mergeSelectedUris(List<T> clipUris, T singleUri) {
+        List<T> result = new ArrayList<>();
+        if (clipUris != null) {
+            for (T uri : clipUris) {
+                if (uri != null && !result.contains(uri))
+                    result.add(uri);
+            }
+        }
+        if (singleUri != null && !result.contains(singleUri))
+            result.add(singleUri);
+        return result;
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
 
@@ -795,12 +850,7 @@ public class MainActivity extends AppCompatActivity {
                     return;
                 }
             } else if (requestCode == SELECT_MULTI_IMAGE) {
-                List<Uri> imageUris = new ArrayList<>();
-                ClipData clipData = data.getClipData();
-                for (int i = 0; i < clipData.getItemCount(); i++) {
-                    imageUris.add(clipData.getItemAt(i).getUri());
-                }
-                handleSelectedImages(imageUris);
+                handleSelectedImages(collectImageUris(data));
             }
 
         }
