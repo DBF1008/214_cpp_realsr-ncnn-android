@@ -772,6 +772,43 @@ public class MainActivity extends AppCompatActivity {
         logTextView.setText(String.format(getString(R.string.input_file_size), inputFileSize));
     }
 
+    /**
+     * 从 Intent 中安全提取所有选中的图片 URI。
+     * <p>
+     * ACTION_GET_CONTENT + EXTRA_ALLOW_MULTIPLE 在不同系统 / 文档提供器上的返回形式不一致：
+     * <ul>
+     *   <li>多选 → ClipData 包含多个 URI</li>
+     *   <li>单选（部分提供器）→ ClipData 为 null，URI 仅在 getData()</li>
+     *   <li>混合返回 → ClipData 和 getData() 同时存在</li>
+     * </ul>
+     * 本方法兼容以上全部情况，保证不抛 NPE。
+     */
+    static List<Uri> collectImageUris(Intent data) {
+        List<Uri> uris = new ArrayList<>();
+        if (data == null) return uris;
+
+        ClipData clipData = data.getClipData();
+        if (clipData != null) {
+            for (int i = 0; i < clipData.getItemCount(); i++) {
+                ClipData.Item item = clipData.getItemAt(i);
+                if (item != null && item.getUri() != null) {
+                    uris.add(item.getUri());
+                }
+            }
+        }
+
+        // Fallback: some providers return a single URI via getData()
+        // when only one item is selected through the multi-picker.
+        if (uris.isEmpty()) {
+            Uri singleUri = data.getData();
+            if (singleUri != null) {
+                uris.add(singleUri);
+            }
+        }
+
+        return uris;
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
 
@@ -795,12 +832,10 @@ public class MainActivity extends AppCompatActivity {
                     return;
                 }
             } else if (requestCode == SELECT_MULTI_IMAGE) {
-                List<Uri> imageUris = new ArrayList<>();
-                ClipData clipData = data.getClipData();
-                for (int i = 0; i < clipData.getItemCount(); i++) {
-                    imageUris.add(clipData.getItemAt(i).getUri());
+                List<Uri> imageUris = collectImageUris(data);
+                if (!imageUris.isEmpty()) {
+                    handleSelectedImages(imageUris);
                 }
-                handleSelectedImages(imageUris);
             }
 
         }
